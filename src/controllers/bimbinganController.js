@@ -1,20 +1,23 @@
-import pool from '../config/database.js';
+import prisma from '../config/database.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { sendError, parseId } from '../utils/apiHelpers.js';
 
 /**
  * Mengambil riwayat logbook bimbingan berdasarkan ID skripsi.
  */
 export async function getBimbinganBySkripsiId(req, res) {
   try {
-    const { skripsiId } = req.params;
+    const skripsiId = parseId(req.params.skripsiId);
+    if (!skripsiId) {
+      return res.json({ success: true, total: 0, data: [] });
+    }
 
-    const [rows] = await pool.query(
-      `SELECT b.*, p.judul, p.nama_mahasiswa, p.nim
+    const rows = await prisma.$queryRaw`
+      SELECT b.*, p.judul, p.nama_mahasiswa, p.nim
        FROM logbook_bimbingan b
        JOIN pengajuan_skripsi p ON b.skripsi_id = p.id
-       WHERE b.skripsi_id = ?
-       ORDER BY b.tanggal_bimbingan DESC, b.id DESC`,
-      [skripsiId]
-    );
+       WHERE b.skripsi_id = ${skripsiId}
+       ORDER BY b.tanggal_bimbingan DESC, b.id DESC`;
 
     return res.json({
       success: true,
@@ -22,12 +25,7 @@ export async function getBimbinganBySkripsiId(req, res) {
       data: rows
     });
   } catch (error) {
-    console.error('[Error getBimbinganBySkripsiId]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mengambil riwayat bimbingan',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal mengambil riwayat bimbingan');
   }
 }
 
@@ -46,11 +44,17 @@ export async function tambahBimbingan(req, res) {
       });
     }
 
+    const skripsiId = Number(skripsi_id);
+    if (!Number.isInteger(skripsiId)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data pengajuan skripsi tidak ditemukan'
+      });
+    }
+
     // Pastikan skripsi berstatus disetujui
-    const [skripsiRows] = await pool.query(
-      `SELECT id, status, nim FROM pengajuan_skripsi WHERE id = ?`,
-      [skripsi_id]
-    );
+    const skripsiRows = await prisma.$queryRaw`
+      SELECT id, status, nim FROM pengajuan_skripsi WHERE id = ${skripsiId}`;
 
     if (skripsiRows.length === 0) {
       return res.status(404).json({
@@ -68,38 +72,24 @@ export async function tambahBimbingan(req, res) {
 
     const file_revisi = req.file ? req.file.filename : null;
 
-    const [result] = await pool.query(
-      `INSERT INTO logbook_bimbingan 
+    const inserted = await prisma.$queryRaw`
+      INSERT INTO logbook_bimbingan
         (skripsi_id, nim, dosen_nip, dosen_nama, tanggal_bimbingan, catatan_mahasiswa, file_revisi, status_acc)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
-      [
-        skripsi_id,
-        nim_nip,
-        dosen_nip,
-        dosen_nama || null,
-        tanggal_bimbingan,
-        catatan_mahasiswa,
-        file_revisi
-      ]
-    );
+       VALUES (${skripsiId}, ${nim_nip}, ${dosen_nip}, ${dosen_nama || null}, ${tanggal_bimbingan}::date, ${catatan_mahasiswa}, ${file_revisi}, 'pending')
+       RETURNING id`;
 
     return res.status(201).json({
       success: true,
       message: 'Catatan bimbingan berhasil ditambahkan!',
       data: {
-        id: result.insertId,
+        id: inserted[0].id,
         skripsi_id,
         file_revisi,
         status_acc: 'pending'
       }
     });
   } catch (error) {
-    console.error('[Error tambahBimbingan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal menambahkan catatan bimbingan',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal menambahkan catatan bimbingan');
   }
 }
 
@@ -108,7 +98,7 @@ export async function tambahBimbingan(req, res) {
  */
 export async function accBimbingan(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
     const { catatan_dosen, status_acc } = req.body;
 
     const validStatus = ['pending', 'revisi', 'acc'];
@@ -119,7 +109,14 @@ export async function accBimbingan(req, res) {
       });
     }
 
-    const [existing] = await pool.query(`SELECT id FROM logbook_bimbingan WHERE id = ?`, [id]);
+    if (!id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data logbook bimbingan tidak ditemukan'
+      });
+    }
+
+    const existing = await prisma.$queryRaw`SELECT id FROM logbook_bimbingan WHERE id = ${id}`;
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
@@ -127,25 +124,18 @@ export async function accBimbingan(req, res) {
       });
     }
 
-    await pool.query(
-      `UPDATE logbook_bimbingan SET
-        catatan_dosen = COALESCE(?, catatan_dosen),
-        status_acc = COALESCE(?, status_acc)
-       WHERE id = ?`,
-      [catatan_dosen || null, status_acc || null, id]
-    );
+    await prisma.$executeRaw`
+      UPDATE logbook_bimbingan SET
+        catatan_dosen = COALESCE(${catatan_dosen || null}, catatan_dosen),
+        status_acc = COALESCE(${status_acc || null}, status_acc)
+       WHERE id = ${id}`;
 
     return res.json({
       success: true,
       message: 'Tanggapan dan status bimbingan berhasil diperbarui!'
     });
   } catch (error) {
-    console.error('[Error accBimbingan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal memperbarui status bimbingan',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal memperbarui status bimbingan');
   }
 }
 
@@ -154,20 +144,25 @@ export async function accBimbingan(req, res) {
  */
 export async function deleteBimbingan(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
     const { nim_nip, role } = req.user;
 
-    let deleteQuery = `DELETE FROM logbook_bimbingan WHERE id = ?`;
-    const params = [id];
-
-    if (role === 'MAHASISWA') {
-      deleteQuery += ` AND nim = ? AND status_acc = 'pending'`;
-      params.push(nim_nip);
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Logbook tidak dapat dihapus (sudah direspon dosen atau bukan milik Anda).'
+      });
     }
 
-    const [result] = await pool.query(deleteQuery, params);
+    let deleteQuery = Prisma.sql`DELETE FROM logbook_bimbingan WHERE id = ${id}`;
 
-    if (result.affectedRows === 0) {
+    if (role === 'MAHASISWA') {
+      deleteQuery = Prisma.sql`DELETE FROM logbook_bimbingan WHERE id = ${id} AND nim = ${nim_nip} AND status_acc = 'pending'`;
+    }
+
+    const affected = await prisma.$executeRaw(deleteQuery);
+
+    if (affected === 0) {
       return res.status(400).json({
         success: false,
         message: 'Logbook tidak dapat dihapus (sudah direspon dosen atau bukan milik Anda).'
@@ -179,11 +174,6 @@ export async function deleteBimbingan(req, res) {
       message: 'Catatan bimbingan berhasil dihapus'
     });
   } catch (error) {
-    console.error('[Error deleteBimbingan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal menghapus catatan bimbingan',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal menghapus catatan bimbingan');
   }
 }

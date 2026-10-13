@@ -1,4 +1,6 @@
-import pool from '../config/database.js';
+import prisma from '../config/database.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { sendError, parseId } from '../utils/apiHelpers.js';
 
 /**
  * Mendaftar seminar proposal (sempro), seminar hasil (semhas), atau sidang skripsi akhir (Mahasiswa).
@@ -16,11 +18,17 @@ export async function daftarSeminar(req, res) {
       });
     }
 
+    const skripsiId = Number(skripsi_id);
+    if (!Number.isInteger(skripsiId)) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data pengajuan skripsi tidak ditemukan'
+      });
+    }
+
     // Pastikan skripsi milik mahasiswa ini dan sudah disetujui
-    const [skripsiRows] = await pool.query(
-      `SELECT id, status, nim FROM pengajuan_skripsi WHERE id = ?`,
-      [skripsi_id]
-    );
+    const skripsiRows = await prisma.$queryRaw`
+      SELECT id, status, nim FROM pengajuan_skripsi WHERE id = ${skripsiId}`;
 
     if (skripsiRows.length === 0) {
       return res.status(404).json({
@@ -44,11 +52,10 @@ export async function daftarSeminar(req, res) {
     }
 
     // Cek apakah sudah ada pendaftaran sejenis yang berstatus menunggu_jadwal atau terjadwal
-    const [activeSidang] = await pool.query(
-      `SELECT id, status FROM pendaftaran_sidang 
-       WHERE skripsi_id = ? AND jenis_sidang = ? AND status IN ('menunggu_jadwal', 'terjadwal')`,
-      [skripsi_id, jenis_sidang]
-    );
+    const activeSidang = await prisma.$queryRaw`
+      SELECT id, status FROM pendaftaran_sidang
+       WHERE skripsi_id = ${skripsiId} AND jenis_sidang = ${jenis_sidang}
+         AND status IN ('menunggu_jadwal', 'terjadwal')`;
 
     if (activeSidang.length > 0) {
       return res.status(400).json({
@@ -59,18 +66,30 @@ export async function daftarSeminar(req, res) {
 
     const file_naskah = req.file ? req.file.filename : null;
 
-    const [result] = await pool.query(
-      `INSERT INTO pendaftaran_sidang 
-        (skripsi_id, jenis_sidang, file_naskah, status)
-       VALUES (?, ?, ?, 'menunggu_jadwal')`,
-      [skripsi_id, jenis_sidang, file_naskah]
-    );
+    // INSERT ... WHERE NOT EXISTS membuat pemeriksaan ganda & penyisipan atomik
+    // dalam satu statement (tanpa butuh transaksi).
+    const inserted = await prisma.$queryRaw`
+      INSERT INTO pendaftaran_sidang (skripsi_id, jenis_sidang, file_naskah, status)
+      SELECT ${skripsiId}, ${jenis_sidang}, ${file_naskah}, 'menunggu_jadwal'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM pendaftaran_sidang
+        WHERE skripsi_id = ${skripsiId} AND jenis_sidang = ${jenis_sidang}
+          AND status IN ('menunggu_jadwal', 'terjadwal')
+      )
+      RETURNING id`;
+
+    if (inserted.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: `Anda sudah memiliki pendaftaran ${jenis_sidang} yang sedang diproses.`
+      });
+    }
 
     return res.status(201).json({
       success: true,
       message: `Pendaftaran ${jenis_sidang} berhasil diajukan! Menunggu plotting jadwal dari program studi.`,
       data: {
-        id: result.insertId,
+        id: inserted[0].id,
         skripsi_id,
         jenis_sidang,
         file_naskah,
@@ -78,12 +97,7 @@ export async function daftarSeminar(req, res) {
       }
     });
   } catch (error) {
-    console.error('[Error daftarSeminar]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mendaftar seminar/sidang',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal mendaftar seminar/sidang');
   }
 }
 
@@ -94,35 +108,38 @@ export async function getJadwalSeminar(req, res) {
   try {
     const { jenis_sidang, status, skripsi_id } = req.query;
 
-    let query = `
-      SELECT s.*, 
-        p.nim, p.nama_mahasiswa, p.judul, p.prodi_id,
-        p.dosen_pembimbing_1_nip, p.dosen_pembimbing_1_nama,
-        p.dosen_pembimbing_2_nip, p.dosen_pembimbing_2_nama
-      FROM pendaftaran_sidang s
-      JOIN pengajuan_skripsi p ON s.skripsi_id = p.id
-      WHERE 1=1
-    `;
-    const params = [];
+    const conditions = [Prisma.sql`TRUE`];
 
     if (jenis_sidang) {
-      query += ` AND s.jenis_sidang = ?`;
-      params.push(jenis_sidang);
+      conditions.push(Prisma.sql`s.jenis_sidang = ${jenis_sidang}`);
     }
 
     if (status) {
-      query += ` AND s.status = ?`;
-      params.push(status);
+      conditions.push(Prisma.sql`s.status = ${status}`);
     }
 
     if (skripsi_id) {
-      query += ` AND s.skripsi_id = ?`;
-      params.push(skripsi_id);
+      const skripsiId = Number(skripsi_id);
+      if (!Number.isInteger(skripsiId)) {
+        return res.status(400).json({ success: false, message: 'Parameter skripsi_id tidak valid.' });
+      }
+      conditions.push(Prisma.sql`s.skripsi_id = ${skripsiId}`);
     }
 
-    query += ` ORDER BY s.jadwal_sidang ASC, s.created_at DESC`;
+    const where = Prisma.join(conditions, ' AND ');
 
-    const [rows] = await pool.query(query, params);
+    // NULLS FIRST pada jadwal_sidang mempertahankan urutan lama MySQL (ASC -> NULL dulu)
+    // nilai_akhir::text mempertahankan kontrak DECIMAL lama (string "88.50" -> bukan objek)
+    const rows = await prisma.$queryRaw`
+      SELECT s.*,
+        p.nim, p.nama_mahasiswa, p.judul, p.prodi_id,
+        p.dosen_pembimbing_1_nip, p.dosen_pembimbing_1_nama,
+        p.dosen_pembimbing_2_nip, p.dosen_pembimbing_2_nama,
+        s.nilai_akhir::text AS nilai_akhir
+      FROM pendaftaran_sidang s
+      JOIN pengajuan_skripsi p ON s.skripsi_id = p.id
+      WHERE ${where}
+      ORDER BY s.jadwal_sidang ASC NULLS FIRST, s.created_at DESC`;
 
     return res.json({
       success: true,
@@ -130,12 +147,7 @@ export async function getJadwalSeminar(req, res) {
       data: rows
     });
   } catch (error) {
-    console.error('[Error getJadwalSeminar]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mengambil jadwal seminar/sidang',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal mengambil jadwal seminar/sidang');
   }
 }
 
@@ -144,7 +156,7 @@ export async function getJadwalSeminar(req, res) {
  */
 export async function updateJadwalSeminar(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
     const { jadwal_sidang, ruangan, status } = req.body;
 
     const validStatus = ['menunggu_jadwal', 'terjadwal', 'lulus', 'revisi'];
@@ -155,7 +167,14 @@ export async function updateJadwalSeminar(req, res) {
       });
     }
 
-    const [existing] = await pool.query(`SELECT id FROM pendaftaran_sidang WHERE id = ?`, [id]);
+    if (!id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data pendaftaran sidang tidak ditemukan'
+      });
+    }
+
+    const existing = await prisma.$queryRaw`SELECT id FROM pendaftaran_sidang WHERE id = ${id}`;
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
@@ -163,25 +182,18 @@ export async function updateJadwalSeminar(req, res) {
       });
     }
 
-    await pool.query(
-      `UPDATE pendaftaran_sidang SET
-        jadwal_sidang = COALESCE(?, jadwal_sidang),
-        ruangan = COALESCE(?, ruangan),
-        status = COALESCE(?, status)
-       WHERE id = ?`,
-      [jadwal_sidang || null, ruangan || null, status || null, id]
-    );
+    await prisma.$executeRaw`
+      UPDATE pendaftaran_sidang SET
+        jadwal_sidang = COALESCE(${jadwal_sidang || null}::timestamptz, jadwal_sidang),
+        ruangan = COALESCE(${ruangan || null}, ruangan),
+        status = COALESCE(${status || null}, status)
+       WHERE id = ${id}`;
 
     return res.json({
       success: true,
       message: 'Jadwal dan status sidang berhasil diperbarui!'
     });
   } catch (error) {
-    console.error('[Error updateJadwalSeminar]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal memperbarui jadwal seminar/sidang',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal memperbarui jadwal seminar/sidang');
   }
 }

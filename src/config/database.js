@@ -1,31 +1,58 @@
-import mysql from 'mysql2/promise';
-import dotenv from 'dotenv';
+import 'dotenv/config';
+import { PrismaClient } from '../generated/prisma/client.js';
+import { PrismaPg } from '@prisma/adapter-pg';
 
-dotenv.config();
+/**
+ * Konfigurasi koneksi PostgreSQL/Neon via Prisma Client (Prisma 7 + driver adapter pg).
+ *
+ * - Aplikasi (runtime) memakai DATABASE_URL.
+ *   Untuk Neon gunakan koneksi POOLED (hostname berakhiran -pooler).
+ * - Prisma CLI (migrate / seed / studio) memakai DIRECT_URL
+ *   yang didefinisikan di prisma.config.ts (koneksi direct/unpooled).
+ */
+const connectionString = process.env.DATABASE_URL || undefined;
 
-const pool = mysql.createPool({
-  host: process.env.DB_HOST || 'localhost',
-  port: parseInt(process.env.DB_PORT || '3306', 10),
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || '',
-  database: process.env.DB_NAME || 'db_sim_skripsi',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0,
-  charset: 'utf8mb4'
+if (!connectionString) {
+  console.warn('[Database] Variabel DATABASE_URL belum ditemukan di .env — koneksi database akan gagal.');
+}
+
+const adapter = new PrismaPg({
+  connectionString,
+  max: 10, // setara connectionLimit: 10 pada mysql2 sebelumnya
+  connectionTimeoutMillis: 15000, // beri waktu Neon "bangun" dari scale-to-zero
 });
 
-// Verifikasi koneksi saat inisialisasi
-export async function testConnection() {
+const prisma = new PrismaClient({ adapter });
+
+function describeUrl(url) {
   try {
-    const connection = await pool.getConnection();
-    console.log(`[Database] Terhubung ke MySQL database '${process.env.DB_NAME || 'db_sim_skripsi'}' di port ${process.env.DB_PORT || 3306}`);
-    connection.release();
+    const u = new URL(url);
+    return `${u.hostname}:${u.port || '5432'}${u.pathname}`;
+  } catch {
+    return '(DATABASE_URL tidak valid)';
+  }
+}
+
+/** Verifikasi koneksi ke PostgreSQL/Neon. */
+export async function testConnection() {
+  if (!connectionString) {
+    console.error('[Database Error] DATABASE_URL tidak diatur. Salin .env.example menjadi .env lalu isi kredensial Neon.');
+    return false;
+  }
+
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    console.log(`[Database] Terhubung ke PostgreSQL: ${describeUrl(connectionString)}`);
     return true;
   } catch (error) {
-    console.error('[Database Error] Gagal terhubung ke MySQL:', error.message);
+    console.error('[Database Error] Gagal terhubung ke PostgreSQL/Neon:', error.message);
     return false;
   }
 }
 
-export default pool;
+/** Tutup koneksi dengan rapi (dipakai pada graceful shutdown). */
+export async function disconnect() {
+  await prisma.$disconnect();
+}
+
+export default prisma;

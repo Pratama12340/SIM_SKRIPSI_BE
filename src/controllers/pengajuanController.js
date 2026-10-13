@@ -1,4 +1,6 @@
-import pool from '../config/database.js';
+import prisma from '../config/database.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { sendError, parseId } from '../utils/apiHelpers.js';
 
 /**
  * Mengambil daftar pengajuan skripsi.
@@ -9,39 +11,40 @@ export async function getAllPengajuan(req, res) {
     const { role, nim_nip } = req.user;
     const { status, prodi_id } = req.query;
 
-    let query = `
-      SELECT p.*,
-        (SELECT COUNT(*) FROM logbook_bimbingan WHERE skripsi_id = p.id) AS total_bimbingan,
-        (SELECT COUNT(*) FROM logbook_bimbingan WHERE skripsi_id = p.id AND status_acc = 'acc') AS total_bimbingan_acc
-      FROM pengajuan_skripsi p
-      WHERE 1=1
-    `;
-    const params = [];
+    const conditions = [Prisma.sql`TRUE`];
 
     if (role === 'MAHASISWA') {
-      query += ` AND p.nim = ?`;
-      params.push(nim_nip);
+      conditions.push(Prisma.sql`p.nim = ${nim_nip}`);
     } else if (role === 'DOSEN') {
       // Dosen melihat yang dibimbingnya atau seluruh pengajuan di prodi
       if (req.query.scope === 'bimbingan') {
-        query += ` AND (p.dosen_pembimbing_1_nip = ? OR p.dosen_pembimbing_2_nip = ?)`;
-        params.push(nim_nip, nim_nip);
+        conditions.push(Prisma.sql`(p.dosen_pembimbing_1_nip = ${nim_nip} OR p.dosen_pembimbing_2_nip = ${nim_nip})`);
       }
     }
 
     if (status) {
-      query += ` AND p.status = ?`;
-      params.push(status);
+      conditions.push(Prisma.sql`p.status = ${status}`);
     }
 
     if (prodi_id) {
-      query += ` AND p.prodi_id = ?`;
-      params.push(prodi_id);
+      const prodiId = Number(prodi_id);
+      if (!Number.isInteger(prodiId)) {
+        return res.status(400).json({ success: false, message: 'Parameter prodi_id tidak valid.' });
+      }
+      conditions.push(Prisma.sql`p.prodi_id = ${prodiId}`);
     }
 
-    query += ` ORDER BY p.created_at DESC`;
+    const where = Prisma.join(conditions, ' AND ');
 
-    const [rows] = await pool.query(query, params);
+    // COUNT(*) di-cast ke int agar aman dari serialisasi BigInt di JSON
+    const rows = await prisma.$queryRaw`
+      SELECT p.*,
+        (SELECT COUNT(*) FROM logbook_bimbingan WHERE skripsi_id = p.id)::int AS total_bimbingan,
+        (SELECT COUNT(*) FROM logbook_bimbingan WHERE skripsi_id = p.id AND status_acc = 'acc')::int AS total_bimbingan_acc
+      FROM pengajuan_skripsi p
+      WHERE ${where}
+      ORDER BY p.created_at DESC
+    `;
 
     return res.json({
       success: true,
@@ -49,12 +52,7 @@ export async function getAllPengajuan(req, res) {
       data: rows
     });
   } catch (error) {
-    console.error('[Error getAllPengajuan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mengambil data pengajuan skripsi',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal mengambil data pengajuan skripsi');
   }
 }
 
@@ -63,9 +61,15 @@ export async function getAllPengajuan(req, res) {
  */
 export async function getPengajuanById(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
+    if (!id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data pengajuan skripsi tidak ditemukan'
+      });
+    }
 
-    const [rows] = await pool.query(`SELECT * FROM pengajuan_skripsi WHERE id = ?`, [id]);
+    const rows = await prisma.$queryRaw`SELECT * FROM pengajuan_skripsi WHERE id = ${id}`;
 
     if (rows.length === 0) {
       return res.status(404).json({
@@ -77,16 +81,14 @@ export async function getPengajuanById(req, res) {
     const pengajuan = rows[0];
 
     // Ambil riwayat logbook bimbingan
-    const [logbooks] = await pool.query(
-      `SELECT * FROM logbook_bimbingan WHERE skripsi_id = ? ORDER BY tanggal_bimbingan DESC`,
-      [id]
-    );
+    const logbooks = await prisma.$queryRaw`
+      SELECT * FROM logbook_bimbingan WHERE skripsi_id = ${id}
+      ORDER BY tanggal_bimbingan DESC`;
 
-    // Ambil riwayat sidang
-    const [sidangs] = await pool.query(
-      `SELECT * FROM pendaftaran_sidang WHERE skripsi_id = ? ORDER BY created_at DESC`,
-      [id]
-    );
+    // Ambil riwayat sidang (nilai_akhir::text mempertahankan kontrak DECIMAL string)
+    const sidangs = await prisma.$queryRaw`
+      SELECT *, nilai_akhir::text AS nilai_akhir FROM pendaftaran_sidang WHERE skripsi_id = ${id}
+      ORDER BY created_at DESC`;
 
     return res.json({
       success: true,
@@ -97,12 +99,7 @@ export async function getPengajuanById(req, res) {
       }
     });
   } catch (error) {
-    console.error('[Error getPengajuanById]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal mengambil detail pengajuan skripsi',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal mengambil detail pengajuan skripsi');
   }
 }
 
@@ -124,39 +121,30 @@ export async function submitPengajuan(req, res) {
     // Nama file proposal jika ada unggahan
     const file_proposal = req.file ? req.file.filename : null;
 
-    const [result] = await pool.query(
-      `INSERT INTO pengajuan_skripsi 
+    const rawProdi = prodi_id || req.body.prodi_id || null;
+    const prodiId = rawProdi === null ? null : Number(rawProdi);
+    if (rawProdi !== null && !Number.isInteger(prodiId)) {
+      return res.status(400).json({ success: false, message: 'prodi_id tidak valid.' });
+    }
+
+    const inserted = await prisma.$queryRaw`
+      INSERT INTO pengajuan_skripsi
         (nim, nama_mahasiswa, prodi_id, judul, bidang_kajian, abstrak, file_proposal, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        nim_nip,
-        nama,
-        prodi_id || req.body.prodi_id || null,
-        judul.trim(),
-        bidang_kajian || null,
-        abstrak || null,
-        file_proposal,
-        status
-      ]
-    );
+      VALUES (${nim_nip}, ${nama}, ${prodiId}, ${judul.trim()}, ${bidang_kajian || null}, ${abstrak || null}, ${file_proposal}, ${status})
+      RETURNING id`;
 
     return res.status(201).json({
       success: true,
       message: 'Pengajuan judul skripsi berhasil disubmit!',
       data: {
-        id: result.insertId,
+        id: inserted[0].id,
         judul,
         file_proposal,
         status
       }
     });
   } catch (error) {
-    console.error('[Error submitPengajuan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal memproses pengajuan skripsi',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal memproses pengajuan skripsi');
   }
 }
 
@@ -165,7 +153,7 @@ export async function submitPengajuan(req, res) {
  */
 export async function updateStatusPengajuan(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
     const {
       status,
       dosen_pembimbing_1_nip,
@@ -183,8 +171,15 @@ export async function updateStatusPengajuan(req, res) {
       });
     }
 
+    if (!id) {
+      return res.status(404).json({
+        success: false,
+        message: 'Data pengajuan skripsi tidak ditemukan'
+      });
+    }
+
     // Cek keberadaan data
-    const [existing] = await pool.query(`SELECT id FROM pengajuan_skripsi WHERE id = ?`, [id]);
+    const existing = await prisma.$queryRaw`SELECT id FROM pengajuan_skripsi WHERE id = ${id}`;
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
@@ -192,37 +187,23 @@ export async function updateStatusPengajuan(req, res) {
       });
     }
 
-    await pool.query(
-      `UPDATE pengajuan_skripsi SET
-        status = COALESCE(?, status),
-        dosen_pembimbing_1_nip = COALESCE(?, dosen_pembimbing_1_nip),
-        dosen_pembimbing_1_nama = COALESCE(?, dosen_pembimbing_1_nama),
-        dosen_pembimbing_2_nip = COALESCE(?, dosen_pembimbing_2_nip),
-        dosen_pembimbing_2_nama = COALESCE(?, dosen_pembimbing_2_nama),
-        catatan_verifikasi = COALESCE(?, catatan_verifikasi)
-       WHERE id = ?`,
-      [
-        status || null,
-        dosen_pembimbing_1_nip || null,
-        dosen_pembimbing_1_nama || null,
-        dosen_pembimbing_2_nip || null,
-        dosen_pembimbing_2_nama || null,
-        catatan_verifikasi || null,
-        id
-      ]
-    );
+    // Semua field bersifat opsional (COALESCE): nilai null/kosong mempertahankan data lama
+    await prisma.$executeRaw`
+      UPDATE pengajuan_skripsi SET
+        status = COALESCE(${status || null}, status),
+        dosen_pembimbing_1_nip = COALESCE(${dosen_pembimbing_1_nip || null}, dosen_pembimbing_1_nip),
+        dosen_pembimbing_1_nama = COALESCE(${dosen_pembimbing_1_nama || null}, dosen_pembimbing_1_nama),
+        dosen_pembimbing_2_nip = COALESCE(${dosen_pembimbing_2_nip || null}, dosen_pembimbing_2_nip),
+        dosen_pembimbing_2_nama = COALESCE(${dosen_pembimbing_2_nama || null}, dosen_pembimbing_2_nama),
+        catatan_verifikasi = COALESCE(${catatan_verifikasi || null}, catatan_verifikasi)
+       WHERE id = ${id}`;
 
     return res.json({
       success: true,
       message: 'Status pengajuan dan dosen pembimbing berhasil diperbarui!'
     });
   } catch (error) {
-    console.error('[Error updateStatusPengajuan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal memperbarui status pengajuan skripsi',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal memperbarui status pengajuan skripsi');
   }
 }
 
@@ -231,21 +212,26 @@ export async function updateStatusPengajuan(req, res) {
  */
 export async function deletePengajuan(req, res) {
   try {
-    const { id } = req.params;
+    const id = parseId(req.params.id);
     const { role, nim_nip } = req.user;
 
-    let deleteQuery = `DELETE FROM pengajuan_skripsi WHERE id = ?`;
-    const params = [id];
+    if (!id) {
+      return res.status(400).json({
+        success: false,
+        message: 'Pengajuan tidak dapat dihapus (mungkin bukan status draft atau bukan milik Anda).'
+      });
+    }
+
+    let deleteQuery = Prisma.sql`DELETE FROM pengajuan_skripsi WHERE id = ${id}`;
 
     // Jika mahasiswa, hanya boleh menghapus draf miliknya
     if (role === 'MAHASISWA') {
-      deleteQuery += ` AND nim = ? AND status = 'draft'`;
-      params.push(nim_nip);
+      deleteQuery = Prisma.sql`DELETE FROM pengajuan_skripsi WHERE id = ${id} AND nim = ${nim_nip} AND status = 'draft'`;
     }
 
-    const [result] = await pool.query(deleteQuery, params);
+    const affected = await prisma.$executeRaw(deleteQuery);
 
-    if (result.affectedRows === 0) {
+    if (affected === 0) {
       return res.status(400).json({
         success: false,
         message: 'Pengajuan tidak dapat dihapus (mungkin bukan status draft atau bukan milik Anda).'
@@ -257,11 +243,6 @@ export async function deletePengajuan(req, res) {
       message: 'Pengajuan skripsi berhasil dihapus'
     });
   } catch (error) {
-    console.error('[Error deletePengajuan]:', error);
-    return res.status(500).json({
-      success: false,
-      message: 'Gagal menghapus pengajuan skripsi',
-      error: error.message
-    });
+    return sendError(res, error, 'Gagal menghapus pengajuan skripsi');
   }
 }

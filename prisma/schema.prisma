@@ -1,0 +1,100 @@
+// ============================================
+// Skema Prisma ORM - SIM Skripsi
+// PostgreSQL / Neon (Prisma ORM 7)
+// Diselaraskan 1:1 dengan schema.sql
+// ============================================
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  // URL koneksi TIDAK didefinisikan di sini pada Prisma 7.
+  // Konfigurasi ada di prisma.config.ts (CLI) dan src/config/database.js (runtime).
+}
+
+model PengajuanSkripsi {
+  id                   Int     @id @default(autoincrement())
+  nim                  String  @db.VarChar(20)
+  namaMahasiswa        String  @map("nama_mahasiswa") @db.VarChar(100)
+  prodiId              Int?    @map("prodi_id")
+  judul                String
+  bidangKajian         String? @map("bidang_kajian") @db.VarChar(100)
+  abstrak              String?
+  fileProposal         String? @map("file_proposal") @db.VarChar(255)
+  dosenPembimbing1Nip  String? @map("dosen_pembimbing_1_nip") @db.VarChar(30)
+  dosenPembimbing1Nama String? @map("dosen_pembimbing_1_nama") @db.VarChar(100)
+  dosenPembimbing2Nip  String? @map("dosen_pembimbing_2_nip") @db.VarChar(30)
+  dosenPembimbing2Nama String? @map("dosen_pembimbing_2_nama") @db.VarChar(100)
+
+  // CHECK (status IN ('draft','diajukan','disetujui','ditolak')) ada di migration.sql
+  status            String  @default("draft") @db.VarChar(20)
+  catatanVerifikasi String? @map("catatan_verifikasi")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  // updated_at dikelola oleh trigger DB (update_updated_at_column)
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  logbooks LogbookBimbingan[]
+  sidangs  PendaftaranSidang[]
+
+  @@index([nim], map: "idx_nim")
+  @@index([status], map: "idx_status")
+  @@index([dosenPembimbing1Nip], map: "idx_dosen1")
+  @@index([dosenPembimbing2Nip], map: "idx_dosen2")
+  @@map("pengajuan_skripsi")
+}
+
+model LogbookBimbingan {
+  id         Int    @id @default(autoincrement())
+  skripsiId  Int    @map("skripsi_id")
+  nim        String @db.VarChar(20)
+  dosenNip   String @map("dosen_nip") @db.VarChar(30)
+  dosenNama  String? @map("dosen_nama") @db.VarChar(100)
+  tanggalBimbingan DateTime @map("tanggal_bimbingan") @db.Date
+  catatanMahasiswa  String @map("catatan_mahasiswa")
+  catatanDosen      String? @map("catatan_dosen")
+  fileRevisi        String? @map("file_revisi") @db.VarChar(255)
+
+  // CHECK (status_acc IN ('pending','revisi','acc')) ada di migration.sql
+  statusAcc String @default("pending") @map("status_acc") @db.VarChar(20)
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  skripsi PengajuanSkripsi @relation(fields: [skripsiId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_logbook_skripsi")
+
+  @@index([skripsiId], map: "idx_skripsi")
+  @@index([nim], map: "idx_logbook_nim")
+  @@index([dosenNip], map: "idx_logbook_dosen")
+  @@map("logbook_bimbingan")
+}
+
+model PendaftaranSidang {
+  id        Int    @id @default(autoincrement())
+  skripsiId Int    @map("skripsi_id")
+
+  // CHECK (jenis_sidang IN ('sempro','semhas','sidang_akhir')) ada di migration.sql
+  jenisSidang String @map("jenis_sidang") @db.VarChar(20)
+
+  fileNaskah  String?   @map("file_naskah") @db.VarChar(255)
+  jadwalSidang DateTime? @map("jadwal_sidang") @db.Timestamptz
+  ruangan     String?   @db.VarChar(100)
+
+  // CHECK (status IN ('menunggu_jadwal','terjadwal','lulus','revisi')) ada di migration.sql
+  status String @default("menunggu_jadwal") @db.VarChar(30)
+
+  nilaiAkhir    Decimal? @map("nilai_akhir") @db.Decimal(5, 2)
+  catatanSidang String?  @map("catatan_sidang")
+
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz
+  updatedAt DateTime @default(now()) @map("updated_at") @db.Timestamptz
+
+  skripsi PengajuanSkripsi @relation(fields: [skripsiId], references: [id], onDelete: Cascade, onUpdate: NoAction, map: "fk_sidang_skripsi")
+
+  @@index([skripsiId], map: "idx_skripsi_sidang")
+  @@index([status], map: "idx_status_sidang")
+  @@map("pendaftaran_sidang")
+}
