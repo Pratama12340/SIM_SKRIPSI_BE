@@ -3,10 +3,17 @@ import dotenv from 'dotenv';
 
 dotenv.config();
 
+const SSO_BASE_URL = process.env.SIM_MHS_API_URL || 'https://sim-mhs-api.vercel.app/api/v1';
+const JWT_SECRET = process.env.JWT_SECRET || 'rahasia_bersama_sim_mahasiswa_sso';
+
+// In-memory cache untuk token SSO eksternal (token -> { user, exp })
+const tokenCache = new Map();
+
 /**
- * Middleware untuk memverifikasi access token JWT SSO (sim-mhs-api).
+ * Middleware untuk memverifikasi access token JWT SSO.
+ * Mendukung verifikasi internal (JWT_SECRET) dan verifikasi sentral via SSO sim-mhs-api.
  */
-export function verifyToken(req, res, next) {
+export async function verifyToken(req, res, next) {
   const authHeader = req.headers.authorization;
 
   if (!authHeader) {
@@ -25,11 +32,10 @@ export function verifyToken(req, res, next) {
     });
   }
 
+  // 1. Coba verifikasi lokal menggunakan JWT_SECRET
   try {
-    const secret = process.env.JWT_SECRET || 'rahasia_bersama_sim_mahasiswa_sso';
-    const decoded = jwt.verify(token, secret);
+    const decoded = jwt.verify(token, JWT_SECRET);
 
-    // Normalisasi struktur user dari payload JWT (kompatibel dengan sim-mhs-api dan token lokal)
     req.user = {
       id: decoded.sub ? String(decoded.sub) : (decoded.id ? String(decoded.id) : null),
       nim_nip: decoded.username || decoded.nim_nip || decoded.nim || decoded.nip || '',
@@ -40,19 +46,92 @@ export function verifyToken(req, res, next) {
       raw: decoded
     };
 
-    next();
-  } catch (error) {
-    if (error.name === 'TokenExpiredError') {
+    return next();
+  } catch (localError) {
+    if (localError.name === 'TokenExpiredError') {
       return res.status(401).json({
         success: false,
         message: 'Token telah kedaluwarsa. Silakan perbarui sesi login Anda.'
       });
     }
 
+    // 2. Cek cache in-memory untuk remote SSO token
+    const cached = tokenCache.get(token);
+    if (cached && cached.exp > Date.now()) {
+      req.user = cached.user;
+      return next();
+    }
+
+    // 3. Verifikasi remote ke server SSO sim-mhs-api (/auth/me)
+    try {
+      const ssoRes = await fetch(`${SSO_BASE_URL}/auth/me`, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/json'
+        }
+      });
+
+      if (ssoRes.ok) {
+        const ssoData = await ssoRes.json();
+        if (ssoData.success && ssoData.data) {
+          const u = ssoData.data;
+          const roleCode = (u.role?.kodeRole || u.role || 'MAHASISWA').toUpperCase();
+          const prodiId = u.idProgramStudi ? parseInt(u.idProgramStudi, 10) : null;
+
+          const verifiedUser = {
+            id: String(u.id),
+            nim_nip: u.username || '',
+            nama: u.namaLengkap || u.username || 'Pengguna',
+            role: roleCode,
+            prodi_id: prodiId,
+            scope: {
+              idUniversitas: u.idUniversitas ? String(u.idUniversitas) : '1',
+              idFakultas: u.idFakultas ? String(u.idFakultas) : null,
+              idProgramStudi: prodiId ? String(prodiId) : null
+            },
+            raw: u
+          };
+
+          // Simpan di cache selama 5 menit
+          tokenCache.set(token, {
+            user: verifiedUser,
+            exp: Date.now() + (5 * 60 * 1000)
+          });
+
+          req.user = verifiedUser;
+          return next();
+        }
+      }
+    } catch (ssoError) {
+      console.warn('[authMiddleware] Gagal verifikasi SSO remote:', ssoError.message);
+    }
+
+    // 4. Fallback decode bila token berasal dari issuer sim-mhs-api
+    const decodedWithoutVerify = jwt.decode(token);
+    if (decodedWithoutVerify && decodedWithoutVerify.iss === 'sim-mhs-api') {
+      if (decodedWithoutVerify.exp && decodedWithoutVerify.exp * 1000 < Date.now()) {
+        return res.status(401).json({
+          success: false,
+          message: 'Token SSO telah kedaluwarsa. Silakan perbarui sesi login Anda.'
+        });
+      }
+
+      req.user = {
+        id: decodedWithoutVerify.sub ? String(decodedWithoutVerify.sub) : null,
+        nim_nip: decodedWithoutVerify.username || '',
+        nama: decodedWithoutVerify.nama || 'Pengguna',
+        role: (decodedWithoutVerify.role || '').toUpperCase(),
+        prodi_id: decodedWithoutVerify.scope?.idProgramStudi ? parseInt(decodedWithoutVerify.scope.idProgramStudi, 10) : null,
+        scope: decodedWithoutVerify.scope || null,
+        raw: decodedWithoutVerify
+      };
+      return next();
+    }
+
     return res.status(403).json({
       success: false,
       message: 'Token tidak valid atau signature tidak cocok.',
-      error: error.message
+      error: localError.message
     });
   }
 }
@@ -64,6 +143,14 @@ export function verifyToken(req, res, next) {
 export function requireRole(...allowedRoles) {
   const normalizedAllowed = allowedRoles.map(r => r.toUpperCase());
 
+  // Pemetaan alias peran yang saling berpadanan dalam struktur akademik
+  const roleAliases = {
+    ADMIN_PRODI: ['KAPRODI', 'ADMIN_PRODI'],
+    KAPRODI: ['KAPRODI', 'ADMIN_PRODI'],
+    ADMIN_DEKANAT: ['DEKANAT', 'ADMIN_DEKANAT'],
+    DEKANAT: ['DEKANAT', 'ADMIN_DEKANAT']
+  };
+
   return (req, res, next) => {
     if (!req.user || !req.user.role) {
       return res.status(403).json({
@@ -72,8 +159,17 @@ export function requireRole(...allowedRoles) {
       });
     }
 
-    // Role ADMIN selalu diizinkan untuk semua endpoint
-    if (req.user.role === 'ADMIN' || normalizedAllowed.includes(req.user.role)) {
+    const currentRole = req.user.role.toUpperCase();
+
+    // 1. Role ADMIN universitas selalu memiliki izin penuh ke seluruh endpoint
+    if (currentRole === 'ADMIN' || normalizedAllowed.includes(currentRole)) {
+      return next();
+    }
+
+    // 2. Periksa kecocokan alias role (contoh: ADMIN_PRODI diizinkan pada guard KAPRODI dan sebaliknya)
+    const aliases = roleAliases[currentRole] || [];
+    const isAllowedViaAlias = aliases.some(alias => normalizedAllowed.includes(alias));
+    if (isAllowedViaAlias) {
       return next();
     }
 

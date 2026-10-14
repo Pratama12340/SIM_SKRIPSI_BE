@@ -298,7 +298,12 @@ Tidak ada tabel login baru yang dibuat — verifikasi sepenuhnya stateless via `
 | Method | Endpoint | Deskripsi | Hak Akses |
 |:---:|---|---|:---:|
 | `GET` | `/health` | Pemeriksaan status server | Publik |
+| `POST` | `/api/auth/login` | Login SSO dengan kredensial sim-mhs-api (5 Roles) | Publik |
+| `GET` | `/api/auth/accounts` | Daftar akun resmi uji coba SSO untuk 5 role | Publik |
+| `POST` | `/api/auth/refresh` | Refresh token akses SSO | Publik |
+| `GET` | `/api/auth/me` | Profil data identitas pengguna SSO aktif | Terautentikasi (Bearer JWT) |
 | `GET` | `/api/pengajuan` | Mengambil daftar pengajuan skripsi | Mahasiswa / Dosen / Admin |
+
 | `GET` | `/api/pengajuan/:id` | Detail lengkap pengajuan judul | Mahasiswa / Dosen / Admin |
 | `POST` | `/api/pengajuan/submit` | Pengajuan draf judul & upload proposal PDF | `MAHASISWA` |
 | `PUT` | `/api/pengajuan/:id/status`| Verifikasi judul & plotting dosen pembimbing | `DOSEN`, `KAPRODI`, `ADMIN` |

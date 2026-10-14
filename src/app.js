@@ -3,6 +3,7 @@ import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
 
+import authRoutes from './routes/authRoutes.js';
 import pengajuanRoutes from './routes/pengajuanRoutes.js';
 import bimbinganRoutes from './routes/bimbinganRoutes.js';
 import seminarRoutes from './routes/seminarRoutes.js';
@@ -31,10 +32,12 @@ app.get('/health', (req, res) => {
 });
 
 // Registrasi Route API Utama
+app.use('/api/auth', authRoutes);
 app.use('/api/pengajuan', pengajuanRoutes);
 app.use('/api/bimbingan', bimbinganRoutes);
 app.use('/api/seminar', seminarRoutes);
 app.use('/api/nilai', nilaiRoutes);
+
 
 // Handler Route 404
 app.use((req, res) => {
