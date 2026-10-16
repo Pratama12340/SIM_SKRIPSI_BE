@@ -42,6 +42,7 @@ export async function verifyToken(req, res, next) {
       nama: decoded.nama || decoded.namaLengkap || 'Pengguna',
       role: (decoded.role || '').toUpperCase(),
       prodi_id: decoded.scope?.idProgramStudi ? parseInt(decoded.scope.idProgramStudi, 10) : (decoded.prodi_id ? parseInt(decoded.prodi_id, 10) : null),
+      fakultas_id: decoded.scope?.idFakultas ? parseInt(decoded.scope.idFakultas, 10) : (decoded.fakultas_id ? parseInt(decoded.fakultas_id, 10) : null),
       scope: decoded.scope || null,
       raw: decoded
     };
@@ -84,6 +85,7 @@ export async function verifyToken(req, res, next) {
             nama: u.namaLengkap || u.username || 'Pengguna',
             role: roleCode,
             prodi_id: prodiId,
+            fakultas_id: u.idFakultas ? parseInt(u.idFakultas, 10) : null,
             scope: {
               idUniversitas: u.idUniversitas ? String(u.idUniversitas) : '1',
               idFakultas: u.idFakultas ? String(u.idFakultas) : null,
@@ -122,6 +124,7 @@ export async function verifyToken(req, res, next) {
         nama: decodedWithoutVerify.nama || 'Pengguna',
         role: (decodedWithoutVerify.role || '').toUpperCase(),
         prodi_id: decodedWithoutVerify.scope?.idProgramStudi ? parseInt(decodedWithoutVerify.scope.idProgramStudi, 10) : null,
+        fakultas_id: decodedWithoutVerify.scope?.idFakultas ? parseInt(decodedWithoutVerify.scope.idFakultas, 10) : null,
         scope: decodedWithoutVerify.scope || null,
         raw: decodedWithoutVerify
       };

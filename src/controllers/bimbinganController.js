@@ -1,6 +1,7 @@
 import prisma from '../config/database.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sendError, parseId } from '../utils/apiHelpers.js';
+import { assertCanAccessSkripsi } from '../utils/scopeFilter.js';
 
 /**
  * Mengambil riwayat logbook bimbingan berdasarkan ID skripsi.
@@ -116,11 +117,24 @@ export async function accBimbingan(req, res) {
       });
     }
 
-    const existing = await prisma.$queryRaw`SELECT id FROM logbook_bimbingan WHERE id = ${id}`;
+    const existing = await prisma.$queryRaw`
+      SELECT b.id, p.prodi_id, p.nim
+      FROM logbook_bimbingan b
+      JOIN pengajuan_skripsi p ON b.skripsi_id = p.id
+      WHERE b.id = ${id}`;
+
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Data logbook bimbingan tidak ditemukan'
+      });
+    }
+
+    const canAccess = await assertCanAccessSkripsi(req.user, existing[0]);
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda tidak memiliki wewenang untuk merespon bimbingan dari prodi/fakultas ini.'
       });
     }
 

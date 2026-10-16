@@ -1,6 +1,7 @@
 import prisma from '../config/database.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sendError, parseId } from '../utils/apiHelpers.js';
+import { buildScopeCondition, assertCanAccessSkripsi } from '../utils/scopeFilter.js';
 
 /**
  * Mendaftar seminar proposal (sempro), seminar hasil (semhas), atau sidang skripsi akhir (Mahasiswa).
@@ -106,9 +107,17 @@ export async function daftarSeminar(req, res) {
  */
 export async function getJadwalSeminar(req, res) {
   try {
-    const { jenis_sidang, status, skripsi_id } = req.query;
+    const { jenis_sidang, status, skripsi_id, prodi_id } = req.query;
 
     const conditions = [Prisma.sql`TRUE`];
+
+    // Terapkan isolasi data berbasis Scope (ADMIN, ADMIN_DEKANAT, ADMIN_PRODI, KAPRODI, MAHASISWA)
+    const scopeCondition = await buildScopeCondition(req.user, {
+      prodiColumn: 'p.prodi_id',
+      nimColumn: 'p.nim',
+      requestedProdiId: prodi_id || null
+    });
+    conditions.push(scopeCondition);
 
     if (jenis_sidang) {
       conditions.push(Prisma.sql`s.jenis_sidang = ${jenis_sidang}`);
@@ -174,11 +183,24 @@ export async function updateJadwalSeminar(req, res) {
       });
     }
 
-    const existing = await prisma.$queryRaw`SELECT id FROM pendaftaran_sidang WHERE id = ${id}`;
+    const existing = await prisma.$queryRaw`
+      SELECT s.id, p.prodi_id, p.nim
+      FROM pendaftaran_sidang s
+      JOIN pengajuan_skripsi p ON s.skripsi_id = p.id
+      WHERE s.id = ${id}`;
+
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Data pendaftaran sidang tidak ditemukan'
+      });
+    }
+
+    const canAccess = await assertCanAccessSkripsi(req.user, existing[0]);
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda tidak memiliki wewenang untuk mengatur jadwal sidang prodi/fakultas ini.'
       });
     }
 

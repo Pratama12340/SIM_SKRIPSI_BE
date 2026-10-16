@@ -1,5 +1,6 @@
 import prisma from '../config/database.js';
 import { sendError, parseId } from '../utils/apiHelpers.js';
+import { assertCanAccessSkripsi } from '../utils/scopeFilter.js';
 
 /**
  * Menginput atau memperbarui nilai akhir dan catatan sidang skripsi (Dosen / Penguji / Admin).
@@ -39,11 +40,24 @@ export async function inputNilaiSidang(req, res) {
       });
     }
 
-    const existing = await prisma.$queryRaw`SELECT id FROM pendaftaran_sidang WHERE id = ${id}`;
+    const existing = await prisma.$queryRaw`
+      SELECT s.id, p.prodi_id, p.nim
+      FROM pendaftaran_sidang s
+      JOIN pengajuan_skripsi p ON s.skripsi_id = p.id
+      WHERE s.id = ${id}`;
+
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Data pendaftaran sidang tidak ditemukan'
+      });
+    }
+
+    const canAccess = await assertCanAccessSkripsi(req.user, existing[0]);
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda tidak memiliki wewenang untuk menilai sidang skripsi ini.'
       });
     }
 

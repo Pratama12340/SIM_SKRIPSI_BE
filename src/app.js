@@ -8,6 +8,7 @@ import pengajuanRoutes from './routes/pengajuanRoutes.js';
 import bimbinganRoutes from './routes/bimbinganRoutes.js';
 import seminarRoutes from './routes/seminarRoutes.js';
 import nilaiRoutes from './routes/nilaiRoutes.js';
+import masterRoutes from './routes/masterRoutes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -41,6 +42,7 @@ app.use('/api/pengajuan', pengajuanRoutes);
 app.use('/api/bimbingan', bimbinganRoutes);
 app.use('/api/seminar', seminarRoutes);
 app.use('/api/nilai', nilaiRoutes);
+app.use('/api/master', masterRoutes);
 
 
 // Handler Route 404

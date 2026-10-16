@@ -19,7 +19,7 @@ if (!connectionString) {
 const adapter = new PrismaPg({
   connectionString,
   max: 10, // setara connectionLimit: 10 pada mysql2 sebelumnya
-  connectionTimeoutMillis: 15000, // beri waktu Neon "bangun" dari scale-to-zero
+  connectionTimeoutMillis: 30000, // beri waktu Neon bangun dari scale-to-zero
 });
 
 const prisma = new PrismaClient({ adapter });

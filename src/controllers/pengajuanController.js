@@ -1,10 +1,11 @@
 import prisma from '../config/database.js';
 import { Prisma } from '../generated/prisma/client.js';
 import { sendError, parseId } from '../utils/apiHelpers.js';
+import { buildScopeCondition, assertCanAccessSkripsi } from '../utils/scopeFilter.js';
 
 /**
  * Mengambil daftar pengajuan skripsi.
- * Otomatis terfilter sesuai role pengguna (Mahasiswa = pengajuan miliknya, Dosen = bimbingannya / prodi).
+ * Otomatis terfilter sesuai role dan scope (Admin, Dekanat Fakultas, Prodi, Mahasiswa, Dosen).
  */
 export async function getAllPengajuan(req, res) {
   try {
@@ -13,10 +14,15 @@ export async function getAllPengajuan(req, res) {
 
     const conditions = [Prisma.sql`TRUE`];
 
-    if (role === 'MAHASISWA') {
-      conditions.push(Prisma.sql`p.nim = ${nim_nip}`);
-    } else if (role === 'DOSEN') {
-      // Dosen melihat yang dibimbingnya atau seluruh pengajuan di prodi
+    // Terapkan isolasi data berbasis Scope (ADMIN, ADMIN_DEKANAT, ADMIN_PRODI, KAPRODI, MAHASISWA)
+    const scopeCondition = await buildScopeCondition(req.user, {
+      prodiColumn: 'p.prodi_id',
+      nimColumn: 'p.nim',
+      requestedProdiId: prodi_id || null
+    });
+    conditions.push(scopeCondition);
+
+    if (role === 'DOSEN') {
       if (req.query.scope === 'bimbingan') {
         conditions.push(Prisma.sql`(p.dosen_pembimbing_1_nip = ${nim_nip} OR p.dosen_pembimbing_2_nip = ${nim_nip})`);
       }
@@ -24,14 +30,6 @@ export async function getAllPengajuan(req, res) {
 
     if (status) {
       conditions.push(Prisma.sql`p.status = ${status}`);
-    }
-
-    if (prodi_id) {
-      const prodiId = Number(prodi_id);
-      if (!Number.isInteger(prodiId)) {
-        return res.status(400).json({ success: false, message: 'Parameter prodi_id tidak valid.' });
-      }
-      conditions.push(Prisma.sql`p.prodi_id = ${prodiId}`);
     }
 
     const where = Prisma.join(conditions, ' AND ');
@@ -79,6 +77,14 @@ export async function getPengajuanById(req, res) {
     }
 
     const pengajuan = rows[0];
+
+    const canAccess = await assertCanAccessSkripsi(req.user, pengajuan);
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda tidak memiliki wewenang untuk melihat pengajuan skripsi dari program studi / fakultas ini.'
+      });
+    }
 
     // Ambil riwayat logbook bimbingan
     const logbooks = await prisma.$queryRaw`
@@ -178,12 +184,20 @@ export async function updateStatusPengajuan(req, res) {
       });
     }
 
-    // Cek keberadaan data
-    const existing = await prisma.$queryRaw`SELECT id FROM pengajuan_skripsi WHERE id = ${id}`;
+    // Cek keberadaan data & hak akses
+    const existing = await prisma.$queryRaw`SELECT * FROM pengajuan_skripsi WHERE id = ${id}`;
     if (existing.length === 0) {
       return res.status(404).json({
         success: false,
         message: 'Data pengajuan skripsi tidak ditemukan'
+      });
+    }
+
+    const canAccess = await assertCanAccessSkripsi(req.user, existing[0]);
+    if (!canAccess) {
+      return res.status(403).json({
+        success: false,
+        message: 'Akses ditolak: Anda tidak memiliki wewenang untuk memverifikasi/mengubah pengajuan dari program studi / fakultas ini.'
       });
     }
 
