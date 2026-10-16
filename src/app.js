@@ -22,14 +22,18 @@ app.use(express.urlencoded({ extended: true }));
 // Akses publik ke file unggahan (PDF proposal & skripsi)
 app.use('/uploads', express.static(path.resolve(__dirname, '../uploads')));
 
-// Health Check Endpoint
-app.get('/health', (req, res) => {
-  res.json({
-    status: 'OK',
-    service: 'SIM Skripsi Backend API',
-    time: new Date().toISOString()
-  });
+// Root & Health Check Endpoint
+const healthPayload = () => ({
+  status: 'OK',
+  service: 'SIM Skripsi Backend API',
+  version: '1.0.0',
+  time: new Date().toISOString()
 });
+
+app.get('/', (req, res) => res.json(healthPayload()));
+app.get('/api', (req, res) => res.json(healthPayload()));
+app.get('/health', (req, res) => res.json(healthPayload()));
+app.get('/api/health', (req, res) => res.json(healthPayload()));
 
 // Registrasi Route API Utama
 app.use('/api/auth', authRoutes);
